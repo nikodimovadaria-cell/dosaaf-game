@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>ДОСААФ — Аркада</title>
+<style>
+  html,body{margin:0;height:100%;background:#06142e;overflow:hidden;touch-action:none}
+  body{display:flex;align-items:center;justify-content:center}
+  canvas{display:block;background:#0a1f44}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/* ============ ДОСААФ · Аркада ============
+   4 режима: Автошкола (авто), Мотошкола (мото), Ан-2, Парашютисты.
+   Управление: палец/мышь/стрелки/A-D. Парашют: кнопка «РАСКРЫТЬ» или Пробел.
+   Чтобы вставить настоящий логотип: загрузите картинку в Image() и
+   нарисуйте в drawMenu() вместо символа ⚓.
+*/
+const C = document.getElementById('c'), X = C.getContext('2d'), W = 480, H = 800;
+C.width = W; C.height = H;
+function fit(){ const s = Math.min(innerWidth/W, innerHeight/H); C.style.width = W*s+'px'; C.style.height = H*s+'px'; }
+addEventListener('resize', fit); fit();
+
+const COL = { navy:'#0a1f44', navy2:'#12305f', navy3:'#1b3f7a', gold:'#e8b53a', red:'#c8232c', ink:'#f3f6fb', mute:'#9fb2d3' };
+const FONT = '"Arial Narrow","Roboto Condensed","Helvetica Neue",Arial,sans-serif';
+const MODES = [
+  { id:'car',  name:'Автошкола',   sub:'Объезжай конусы и машины, собирай звёзды' },
+  { id:'moto', name:'Мотошкола',   sub:'Выше скорость, уже дорога' },
+  { id:'an2',  name:'Ан-2',        sub:'Лети сквозь облака, бери топливо' },
+  { id:'para', name:'Парашютисты', sub:'Проходи кольца и садись в яблочко' }
+];
+
+let state = 'menu', mode = 'car', best = {};
+try { best = JSON.parse(localStorage.getItem('dosaaf_best') || '{}'); } catch(e){}
+let px = W/2, tx = W/2, keys = {}, t = 0, score = 0, lives = 3, ents = [], fx = [], spawn = 0,
+    speed = 300, inv = 0, shake = 0, roadOff = 0, over = null,
+    alt = 3000, vr = 160, chute = false, tgx = W/2, deco = [];
+
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const rand = (a,b) => a + Math.random()*(b-a);
+
+/* ---------- ввод ---------- */
+function pt(e){ const r = C.getBoundingClientRect(); return [(e.clientX-r.left)/r.width*W, (e.clientY-r.top)/r.height*H]; }
+C.addEventListener('pointerdown', e => { const [x,y] = pt(e); click(x,y); if (state==='play' && !(mode==='para' && y>H-120)) tx = x; });
+C.addEventListener('pointermove', e => { if (state==='play') { const [x,y] = pt(e); if (!(mode==='para' && y>H-120)) tx = x; } });
+addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (e.key===' ' || e.key==='Enter') { if (state==='play' && mode==='para') openChute(); else if (state==='over') start(mode); }
+  if (e.key==='Escape') state = 'menu';
+});
+addEventListener('keyup', e => keys[e.key] = false);
+
+function click(x,y){
+  if (state==='menu') {
+    MODES.forEach((m,i) => { if (x>30 && x<450 && y>250+i*112 && y<250+i*112+98) start(m.id); });
+  } else if (state==='play' && mode==='para' && y>H-120) {
+    openChute();
+  } else if (state==='over') {
+    if (y>520 && y<590) start(mode);
+    else if (y>610 && y<680) state = 'menu';
+  }
+}
+
+/* ---------- старт / конец ---------- */
+function start(m){
+  mode = m; state = 'play'; t = 0; score = 0; lives = 3; ents = []; fx = []; spawn = .6; inv = 0; over = null;
+  px = tx = W/2; chute = false; alt = 3000; vr = 160; tgx = rand(150, 330);
+  speed = m==='moto' ? 420 : m==='an2' ? 300 : 320;
+  deco = Array.from({length:7}, () => ({ x:rand(0,W), y:rand(0,H), s:rand(.6,1.4) }));
+}
+function finish(title, text){
+  const k = mode; const sc = Math.floor(score);
+  if (!best[k] || sc > best[k]) { best[k] = sc; try { localStorage.setItem('dosaaf_best', JSON.stringify(best)); } catch(e){} }
+  over = { title, text, score:sc, best:best[k] }; state = 'over';
+}
+function openChute(){ if (!chute) { chute = true; fx.push({x:px,y:220,r:10,a:1,ring:true}); } }
+
+/* ---------- логика ---------- */
+function update(dt){
+  t += dt;
+  if (keys.ArrowLeft || keys.a || keys.A) tx -= 440*dt;
+  if (keys.ArrowRight || keys.d || keys.D) tx += 440*dt;
+  const road = mode==='car' || mode==='moto';
+  tx = clamp(tx, road ? 105 : 45, road ? W-105 : W-45);
+  px += (tx-px) * Math.min(1, dt*10);
+  inv = Math.max(0, inv-dt); shake = Math.max(0, shake-dt*30);
+
+  if (mode==='para') return updatePara(dt);
+
+  speed = Math.min(speed + dt*7, mode==='moto' ? 760 : 620);
+  roadOff += speed*dt;
+  score += dt*speed*0.05;
+  const py = road ? H-140 : H-170;
+
+  spawn -= dt;
+  if (spawn <= 0) {
+    spawn = (0.45 + Math.random()*0.5) * (320/speed) * (mode==='moto' ? .85 : 1);
+    const r = Math.random();
+    if (road) {
+      const x = rand(120, W-120);
+      if (r < .5) ents.push({k:'cone', x, y:-40, r:16, m:1});
+      else if (r < .72 && mode==='car') ents.push({k:'car', x, y:-60, r:30, m:.45, c:Math.random()<.5 ? '#e9eef7' : '#5b6b86'});
+      else if (r < .72) ents.push({k:'barrel', x, y:-40, r:18, m:1});
+      else ents.push({k:'star', x, y:-40, r:18, m:1});
+    } else {
+      const x = rand(60, W-60);
+      if (r < .38) ents.push({k:'cloud', x, y:-60, r:44, m:1});
+      else if (r < .6) ents.push({k:'bird', x, y:-30, r:15, m:1.15, vx:rand(-90,90)});
+      else ents.push({k:'fuel', x, y:-40, r:20, m:1});
+    }
+  }
+  const pr = mode==='car' ? 24 : mode==='moto' ? 14 : 34;
+  for (const e of ents) {
+    e.y += speed*e.m*dt; if (e.vx) e.x += e.vx*dt;
+    if (!e.dead && Math.hypot(e.x-px, e.y-py) < e.r*.85 + pr*.8) {
+      if (e.k==='star' || e.k==='fuel') { score += 50; e.dead = true; fx.push({x:e.x,y:e.y,r:12,a:1,ring:true}); }
+      else if (inv<=0) { lives--; inv = 1.3; shake = 10; e.dead = true; fx.push({x:e.x,y:e.y,r:12,a:1,ring:true,red:true}); }
+    }
+  }
+  ents = ents.filter(e => !e.dead && e.y < H+90);
+  if (lives <= 0) finish(road ? 'Занятие окончено' : 'Посадка вынужденная', mode==='an2' ? 'Борт получил повреждения.' : 'Нужно ещё потренироваться.');
+}
+
+function updatePara(dt){
+  const target = chute ? 45 : 160;
+  vr += (target - vr) * Math.min(1, dt*2.2);
+  alt -= vr*dt;
+  const vpx = vr*2.6;
+  roadOff += vpx*dt;
+  spawn -= dt;
+  if (spawn <= 0 && alt > 500) { spawn = chute ? 1.3 : .9; ents.push({k:'ring', x:rand(80,W-80), y:H+40, r:40, done:false}); }
+  for (const e of ents) {
+    e.y -= vpx*dt;
+    if (!e.done && e.y <= 220) {
+      e.done = true;
+      if (Math.abs(e.x-px) < e.r) { score += 100; fx.push({x:e.x,y:220,r:20,a:1,ring:true}); }
+      else e.miss = true;
+    }
+  }
+  ents = ents.filter(e => e.y > -80);
+  if (alt <= 0) {
+    alt = 0;
+    if (!chute) return finish('Парашют не раскрыт!', 'Раскрывай купол заранее.');
+    if (vr > 90) return finish('Жёсткое приземление', 'Раскрой купол выше — скорость не успела упасть.');
+    const d = Math.abs(px - tgx);
+    let b, txt;
+    if (d < 28) { b = 1000; txt = 'В яблочко!'; }
+    else if (d < 60) { b = 500; txt = 'Отличная точность'; }
+    else if (d < 110) { b = 200; txt = 'Хорошая посадка'; }
+    else { b = 50; txt = 'Далеко от цели'; }
+    score += b;
+    finish('Приземление!', txt + ' (+' + b + ')');
+  }
+}
+
+/* ---------- рисование: примитивы ---------- */
+function rr(x,y,w,h,r){ X.beginPath(); X.roundRect(x,y,w,h,r); }
+function txt(s,x,y,size,color,align='left',weight='bold'){ X.font = weight+' '+size+'px '+FONT; X.fillStyle = color; X.textAlign = align; X.textBaseline = 'alphabetic'; X.fillText(s,x,y); }
+function star(x,y,r,color){ X.fillStyle = color; X.beginPath(); for (let i=0;i<10;i++){ const a = -Math.PI/2 + i*Math.PI/5, rad = i%2 ? r*.45 : r; X.lineTo(x+Math.cos(a)*rad, y+Math.sin(a)*rad);} X.closePath(); X.fill(); }
+
+function car(x,y,c){
+  X.fillStyle = '#05101f'; [[-24,-26],[18,-26],[-24,14],[18,14]].forEach(w => X.fillRect(x+w[0], y+w[1], 7, 18));
+  X.fillStyle = c; rr(x-20,y-38,40,76,11); X.fill();
+  X.fillStyle = '#0a1f44'; rr(x-14,y-20,28,16,4); X.fill(); rr(x-14,y+8,28,14,4); X.fill();
+  X.fillStyle = COL.gold; X.fillRect(x-2,y-38,4,76);
+}
+function moto(x,y){
+  X.fillStyle = '#05101f'; rr(x-5,y-40,10,26,4); X.fill(); rr(x-5,y+16,10,26,4); X.fill();
+  X.fillStyle = COL.red; rr(x-9,y-18,18,40,8); X.fill();
+  X.fillStyle = '#c8d3e6'; X.fillRect(x-24,y-24,48,5);
+  X.fillStyle = COL.navy3; X.beginPath(); X.ellipse(x,y+2,9,13,0,0,7); X.fill();
+  X.fillStyle = COL.gold; X.beginPath(); X.arc(x,y-6,8,0,7); X.fill();
+}
+function an2(x,y){
+  X.save(); X.translate(x,y);
+  X.fillStyle = '#d7e0ef'; rr(-12,-52,24,104,12); X.fill();            // фюзеляж
+  X.fillStyle = COL.red; X.fillRect(-12,-8,24,9);                      // полоса
+  X.fillStyle = '#9fb2d3'; rr(-82,-20,164,26,5); X.fill();             // верхнее крыло
+  X.fillStyle = '#c8d3e6'; rr(-72,-2,144,18,5); X.fill();             // нижнее крыло
+  X.fillStyle = COL.gold; X.fillRect(-82,-20,10,26); X.fillRect(72,-20,10,26);
+  X.fillStyle = '#9fb2d3'; rr(-30,38,60,12,4); X.fill();               // стабилизатор
+  X.fillStyle = COL.navy; X.beginPath(); X.ellipse(0,-30,7,10,0,0,7); X.fill();
+  X.save(); X.translate(0,-54); X.rotate(t*40); X.fillStyle = 'rgba(255,255,255,.75)'; X.fillRect(-34,-2.5,68,5); X.restore();
+  X.restore();
+}
+function diver(x,y,open){
+  if (open) {
+    X.save(); X.translate(x,y-70);
+    for (let i=0;i<8;i++){ X.fillStyle = i%2 ? '#f3f6fb' : COL.red; X.beginPath(); X.moveTo(0,0); X.arc(0,0,62,Math.PI+i*Math.PI/8,Math.PI+(i+1)*Math.PI/8); X.fill(); }
+    X.strokeStyle = 'rgba(255,255,255,.6)'; X.lineWidth = 1.2;
+    [-60,-30,30,60].forEach(dx => { X.beginPath(); X.moveTo(dx,0); X.lineTo(0,70); X.stroke(); });
+    X.restore();
+  }
+  X.strokeStyle = COL.navy3; X.lineWidth = 7; X.lineCap = 'round';
+  const s = open ? 0.35 : 1;
+  X.beginPath(); X.moveTo(x-26*s-4,y+10); X.lineTo(x,y-2); X.lineTo(x+26*s+4,y+10);
+  X.moveTo(x-10*s-3,y+34); X.lineTo(x,y+10); X.lineTo(x+10*s+3,y+34); X.stroke();
+  X.fillStyle = '#4a6a3a'; rr(x-9,y-12,18,28,8); X.fill();
+  X.fillStyle = COL.gold; X.beginPath(); X.arc(x,y-14,9,0,7); X.fill();
+}
+
+/* ---------- рисование: фоны ---------- */
+function drawRoad(){
+  X.fillStyle = COL.navy2; X.fillRect(0,0,W,H);
+  X.fillStyle = '#1c2b44'; X.fillRect(70,0,340,H);
+  const seg = 44, off = roadOff % (seg*2);
+  for (let y=-seg*2; y<H+seg; y+=seg*2) { X.fillStyle = COL.red; X.fillRect(62,y+off,10,seg); X.fillRect(408,y+off,10,seg); X.fillStyle = '#f3f6fb'; X.fillRect(62,y+off+seg,10,seg); X.fillRect(408,y+off+seg,10,seg); }
+  X.fillStyle = COL.gold;
+  for (let y=-80; y<H+80; y+=80) { X.fillRect(W/2-3, y + roadOff%80, 6, 40); }
+  X.fillStyle = 'rgba(255,255,255,.07)';
+  for (let y=-100; y<H+100; y+=100) X.fillRect(24, y + (roadOff*.5)%100, 4, 30), X.fillRect(W-28, y + (roadOff*.5)%100, 4, 30);
+}
+function drawSky(down){
+  const g = X.createLinearGradient(0,0,0,H); g.addColorStop(0,'#0a1f44'); g.addColorStop(1,'#3a78c2');
+  X.fillStyle = g; X.fillRect(0,0,W,H);
+  X.fillStyle = 'rgba(255,255,255,.14)';
+  for (const d of deco) {
+    d.y += (down ? 1 : -1) * (down ? speed*.4 : vr*1.3) * (1/60) * d.s;
+    if (d.y > H+80) { d.y = -80; d.x = rand(0,W); } if (d.y < -80) { d.y = H+80; d.x = rand(0,W); }
+    X.beginPath(); X.ellipse(d.x,d.y,60*d.s,22*d.s,0,0,7); X.fill();
+  }
+}
+function drawGround(){
+  const a = clamp((900-alt)/600, 0, 1); if (a <= 0) return;
+  X.globalAlpha = a;
+  X.fillStyle = '#1f4a3a'; X.fillRect(0,0,W,H);
+  X.fillStyle = '#2a5d49'; for (let i=0;i<8;i++) X.fillRect(0, i*110 + (roadOff*.3)%110 - 110, W, 55);
+  const ty = 220 + alt*1.2;
+  [[70,COL.red],[52,'#f3f6fb'],[34,COL.red],[16,COL.gold]].forEach(c => { X.fillStyle = c[1]; X.beginPath(); X.ellipse(tgx,ty,c[0],c[0]*.8,0,0,7); X.fill(); });
+  X.globalAlpha = 1;
+}
+
+/* ---------- рисование: сущности ---------- */
+function drawEnt(e){
+  const {x,y} = e;
+  if (e.k==='cone') { X.fillStyle = '#ff7a1a'; X.beginPath(); X.moveTo(x,y-18); X.lineTo(x+15,y+14); X.lineTo(x-15,y+14); X.fill(); X.fillStyle = '#fff'; X.fillRect(x-8,y-2,16,6); }
+  else if (e.k==='barrel') { X.fillStyle = COL.red; rr(x-17,y-20,34,40,6); X.fill(); X.fillStyle = COL.gold; X.fillRect(x-17,y-6,34,6); }
+  else if (e.k==='car') car(x,y,e.c);
+  else if (e.k==='star') star(x,y,19,COL.gold);
+  else if (e.k==='cloud') { X.fillStyle = 'rgba(240,246,255,.95)'; [[-26,6,26],[0,-8,32],[26,6,26],[0,14,28]].forEach(c => { X.beginPath(); X.arc(x+c[0],y+c[1],c[2]*.8,0,7); X.fill(); }); }
+  else if (e.k==='bird') { X.strokeStyle = '#05101f'; X.lineWidth = 4; X.lineCap = 'round'; const f = Math.sin(t*14)*8; X.beginPath(); X.moveTo(x-18,y+f); X.lineTo(x,y+4); X.lineTo(x+18,y+f); X.stroke(); }
+  else if (e.k==='fuel') { X.fillStyle = COL.red; rr(x-14,y-18,28,36,5); X.fill(); X.fillStyle = COL.gold; X.fillRect(x-14,y-6,28,8); X.fillRect(x-5,y-24,10,8); }
+  else if (e.k==='ring') { X.lineWidth = 8; X.strokeStyle = e.miss ? 'rgba(200,35,44,.6)' : COL.gold; X.beginPath(); X.ellipse(x,y,e.r,e.r*.4,0,0,7); X.stroke(); }
+}
+
+function drawHUD(){
+  txt('Очки ' + Math.floor(score), 20, 40, 28, COL.ink);
+  if (mode==='para') {
+    txt(Math.max(0,Math.round(alt)) + ' м', W-20, 40, 28, COL.gold, 'right');
+    txt(chute ? 'Купол раскрыт' : 'Свободное падение', W-20, 66, 16, COL.mute, 'right', 'normal');
+    if (!chute) { X.fillStyle = COL.red; rr(40,H-100,W-80,66,10); X.fill(); txt('РАСКРЫТЬ ПАРАШЮТ', W/2, H-58, 28, '#fff', 'center'); }
+  } else {
+    for (let i=0;i<3;i++) txt('♥', W-30-i*30, 42, 28, i < lives ? COL.red : '#3a4a68', 'center');
+  }
+}
+
+/* ---------- меню / финал ---------- */
+function drawMenu(){
+  const g = X.createLinearGradient(0,0,0,H); g.addColorStop(0,'#0a1f44'); g.addColorStop(1,'#06142e'); X.fillStyle = g; X.fillRect(0,0,W,H);
+  X.strokeStyle = COL.gold; X.lineWidth = 4; X.beginPath(); X.arc(W/2,92,52,0,7); X.stroke();
+  X.strokeStyle = COL.red; X.lineWidth = 4; X.beginPath(); X.arc(W/2,92,60,.2,Math.PI-.2); X.stroke();
+  txt('⚓', W/2, 114, 60, COL.gold, 'center');
+  txt('ДОСААФ РОССИИ', W/2, 198, 40, COL.ink, 'center');
+  txt('Выбери занятие', W/2, 232, 18, COL.mute, 'center', 'normal');
+  MODES.forEach((m,i) => {
+    const y = 250 + i*112;
+    X.fillStyle = COL.navy2; rr(30,y,420,98,12); X.fill();
+    X.strokeStyle = 'rgba(232,181,58,.4)'; X.lineWidth = 2; rr(30,y,420,98,12); X.stroke();
+    X.fillStyle = COL.navy; rr(44,y+14,70,70,10); X.fill();
+    if (m.id==='car') car(79,y+49,COL.red); if (m.id==='moto') moto(79,y+49);
+    if (m.id==='an2') { X.save(); X.scale(.55,.55); an2(79/.55, (y+49)/.55); X.restore(); }
+    if (m.id==='para') { X.save(); X.scale(.6,.6); diver(79/.6, (y+66)/.6, true); X.restore(); }
+    txt(m.name, 134, y+44, 30, COL.ink);
+    txt(m.sub, 134, y+72, 15, COL.mute, 'left', 'normal');
+    if (best[m.id]) txt('рекорд ' + best[m.id], 436, y+30, 15, COL.gold, 'right');
+  });
+  txt('Служим России!', W/2, H-24, 18, COL.gold, 'center');
+}
+function drawOver(){
+  X.fillStyle = 'rgba(6,20,46,.88)'; X.fillRect(0,0,W,H);
+  txt(over.title, W/2, 250, 40, COL.gold, 'center');
+  txt(over.text, W/2, 290, 18, COL.mute, 'center', 'normal');
+  txt(String(over.score), W/2, 400, 96, COL.ink, 'center');
+  txt('очков', W/2, 432, 20, COL.mute, 'center', 'normal');
+  txt('Рекорд: ' + over.best, W/2, 480, 22, COL.gold, 'center');
+  X.fillStyle = COL.red; rr(90,520,300,70,12); X.fill(); txt('ЕЩЁ РАЗ', W/2, 566, 28, '#fff', 'center');
+  X.strokeStyle = COL.gold; X.lineWidth = 2; rr(90,610,300,70,12); X.stroke(); txt('В МЕНЮ', W/2, 656, 28, COL.gold, 'center');
+}
+
+/* ---------- кадр ---------- */
+function frame(now){
+  const dt = Math.min(.05, (now - (frame.last || now))/1000); frame.last = now;
+  if (state==='menu') drawMenu();
+  else {
+    if (state==='play') update(dt);
+    X.save();
+    if (shake > 0) X.translate(rand(-shake,shake), rand(-shake,shake));
+    if (mode==='car' || mode==='moto') drawRoad(); else drawSky(mode==='an2');
+    if (mode==='para') drawGround();
+    const road = mode==='car' || mode==='moto';
+    ents.forEach(drawEnt);
+    if (inv<=0 || Math.floor(t*14)%2) {
+      if (mode==='car') car(px,H-140,COL.red);
+      else if (mode==='moto') moto(px,H-140);
+      else if (mode==='an2') an2(px,H-170);
+      else diver(px,220,chute);
+    }
+    for (const f of fx) { f.r += 90*dt; f.a -= dt*2; X.strokeStyle = (f.red ? '200,35,44' : '232,181,58'); X.strokeStyle = 'rgba('+(f.red?'200,35,44':'232,181,58')+','+Math.max(0,f.a)+')'; X.lineWidth = 4; X.beginPath(); X.arc(f.x,f.y,f.r,0,7); X.stroke(); }
+    fx = fx.filter(f => f.a > 0);
+    X.restore();
+    drawHUD();
+    if (state==='over') drawOver();
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
